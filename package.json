@@ -1,0 +1,13 @@
+{
+  "name": "print-quote-api",
+  "version": "1.0.0",
+  "description": "3D print quote API: upload an STL, get weight, print time and price as JSON",
+  "main": "src/server.js",
+  "scripts": { "start": "node src/server.js" },
+  "license": "ISC",
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}

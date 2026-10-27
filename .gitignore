@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# runtime data (estimator learning), keep the folder itself
+data/*
+!data/.gitkeep
+
+# saved test results and uploads
+quote.json
+*-quote.json
+*.stl
+uploads/
+
+# secrets and local settings
+.env
+.env.*
+docker-compose.override.yml
+
+# logs
+*.log
+npm-debug.log*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

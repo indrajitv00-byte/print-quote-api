@@ -1,0 +1,13 @@
+services:
+  print-quote-api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # API_KEY: "change-me"        # uncomment to require header  x-api-key: change-me
+      SLICE_TIMEOUT_MS: "180000"
+    volumes:
+      - quote-data:/app/data           # keeps the estimator's learning between restarts
+    restart: unless-stopped
+volumes:
+  quote-data:
