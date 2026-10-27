@@ -12,15 +12,12 @@ const { estimate, rawEstimate, recordSample } = require('./estimator');
 const PORT = Number(process.env.PORT) || 3000;
 const API_KEY = process.env.API_KEY || '';           // optional: if set, clients must send header x-api-key
 const MAX_TRIANGLES = 500000;
-// All materials are sliced with the PLA template (density 1.24 g/cm3); the weight is then
-// corrected by each material's density. To use a real PETG/ABS profile later, give it its own
-// template here and set tpl to that file.
-const PLA_TEMPLATE = path.join(__dirname, '..', 'templates', 'PLA_standard.3mf');
-const TEMPLATE_DENSITY = 1.24;
+// One OrcaSlicer template per material (printer, process and that material's filament profile)
+const tpl = name => path.join(__dirname, '..', 'templates', name + '_standard.3mf');
 const MATERIALS = {
-  PLA:  { density: 1.24, tpl: PLA_TEMPLATE },
-  PETG: { density: 1.27, tpl: PLA_TEMPLATE },
-  ABS:  { density: 1.04, tpl: PLA_TEMPLATE },
+  PLA:  { tpl: tpl('PLA') },
+  PETG: { tpl: tpl('PETG') },
+  ABS:  { tpl: tpl('ABS') },
 };
 const INFILLS = [10, 15, 20, 30, 40, 50, 60, 70, 80, 90];
 const QUALITY = { standard: 0.2, medium: 0.15, high: 0.1 }; // layer height in mm
@@ -56,7 +53,7 @@ function parseOptions(body) {
 // one slice at a time: OrcaSlicer is heavy, extra requests simply wait their turn
 let chain = Promise.resolve();
 const enqueue = fn => { const run = chain.then(fn, fn); chain = run.catch(() => {}); return run; };
-const cache = new Map(); // file hash + options -> slicer stats (PLA settings)
+const cache = new Map(); // file hash + options -> slicer stats 
 
 app.use((req, res, next) => {
   if (API_KEY && req.path !== '/health' && req.get('x-api-key') !== API_KEY) return res.status(401).json({ error: 'Missing or wrong x-api-key' });
@@ -90,26 +87,24 @@ app.post('/api/quote', upload.single('model'), async (req, res) => {
 
     let stats, gcode;
     if (wantExact) {
-      const key = crypto.createHash('sha256').update(hash + JSON.stringify([opts.scale, opts.infill, opts.layerHeight, opts.walls, opts.supports, opts.rot])).digest('hex');
+      const key = crypto.createHash('sha256').update(hash + JSON.stringify([opts.material, opts.scale, opts.infill, opts.layerHeight, opts.walls, opts.supports, opts.rot])).digest('hex');
       if (!opts.gcode && cache.has(key)) stats = cache.get(key); // G-code is not cached, so a gcode request always slices
       else {
-        const raw = rawEstimate(m, { ...opts, material: 'PLA' });
+        const raw = rawEstimate(m, opts);
         stats = await enqueue(() => sliceStl(file, {
-          template: PLA_TEMPLATE, scale: opts.scale, infill: opts.infill, rot: opts.rot,
+          template: MATERIALS[opts.material].tpl, scale: opts.scale, infill: opts.infill, rot: opts.rot,
           layerHeight: opts.layerHeight, walls: opts.walls, supports: opts.supports, returnGcode: opts.gcode,
         }));
         if (opts.gcode) { gcode = stats.gcode; delete stats.gcode; }
         cache.set(key, stats);
         if (cache.size > 200) cache.delete(cache.keys().next().value);
-        recordSample(raw, stats, { ...opts, material: 'PLA' }, key); // teaches the instant estimate from real slices
+        recordSample(raw, stats, opts, key); // teaches the instant estimate from real slices
       }
     } else {
       stats = estimate(m, opts).stats;
     }
 
-    let { weightG, seconds, sizeMm, volumeCm3, watertight } = stats;
-    // exact slices were made with PLA settings: correct the weight for the chosen material's density
-    if (wantExact) weightG = Number((weightG * MATERIALS[opts.material].density / TEMPLATE_DENSITY).toFixed(2));
+    const { weightG, seconds, sizeMm, volumeCm3, watertight } = stats;
     if (String(req.query.download) === '1') {
       res.setHeader('Content-Disposition', `attachment; filename="${req.file.originalname.replace(/\.stl$/i, '').replace(/[^\w.-]/g, '_')}-result.json"`);
     }

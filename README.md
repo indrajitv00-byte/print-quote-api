@@ -45,9 +45,10 @@ PowerShell (Windows): use `curl.exe -F "model=@part.stl" http://localhost:3000/a
 | gcode | true / false: also return the G-code (exact slices only) | false |
 | mode | `auto`, `exact` (OrcaSlicer), `estimate` (instant, approximate) | `auto` = exact when the slicer is installed |
 
-Material note: every material is sliced with the PLA template, and the weight is corrected by the
-material's density (PLA 1.24, PETG 1.27, ABS 1.04 g/cm3). Print time is the PLA time. For exact
-PETG/ABS times, add a template made from a PETG/ABS profile in OrcaSlicer.
+Material: each material has its own OrcaSlicer template in `templates/` (`PLA_standard.3mf`,
+`PETG_standard.3mf`, `ABS_standard.3mf`), so weight and time come from a real slice with that
+material's filament profile. To change a material's settings, edit its template in OrcaSlicer
+(keep the model inside named `test.stl`) and save it over the file, then rebuild.
 
 ## Response
 
@@ -64,7 +65,7 @@ PETG/ABS times, add a template made from a PETG/ABS profile in OrcaSlicer.
 ```
 
 With `gcode=true` the response also has a `"gcode"` field: the complete G-code as one text string
-(can be several MB for big models). It is the PLA slice, so for PETG/ABS the temperatures in it are PLA's.
+(can be several MB for big models).
 
 Errors return `{ "error": "..." }` with HTTP 400, 401, 413, 500 or 503.
 `GET /health` returns `{"ok":true,"slicer":true}`.
