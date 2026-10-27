@@ -50,7 +50,7 @@ function parseOptions(body) {
   const mode = String(body.mode || 'auto');
   if (!['auto', 'exact', 'estimate'].includes(mode)) return { error: 'mode must be auto, exact or estimate' };
   const bool = v => v === true || v === 'true' || v === '1' || v === 1;
-  return { scale, infill, material, quality, layerHeight, strength, walls: STRENGTH[strength], rot, mode, supports: bool(body.supports) };
+  return { scale, infill, material, quality, layerHeight, strength, walls: STRENGTH[strength], rot, mode, supports: bool(body.supports), gcode: bool(body.gcode) };
 }
 
 // one slice at a time: OrcaSlicer is heavy, extra requests simply wait their turn
@@ -86,16 +86,19 @@ app.post('/api/quote', upload.single('model'), async (req, res) => {
     const wantExact = opts.mode === 'exact' || (opts.mode === 'auto' && slicerAvailable());
     if (opts.mode === 'exact' && !slicerAvailable()) return res.status(503).json({ error: 'OrcaSlicer is not installed in this environment; use mode=estimate' });
 
-    let stats;
+    if (opts.gcode && !wantExact) return res.status(400).json({ error: 'gcode=true needs the real slicer (mode exact or auto with OrcaSlicer installed)' });
+
+    let stats, gcode;
     if (wantExact) {
       const key = crypto.createHash('sha256').update(hash + JSON.stringify([opts.scale, opts.infill, opts.layerHeight, opts.walls, opts.supports, opts.rot])).digest('hex');
-      if (cache.has(key)) stats = cache.get(key);
+      if (!opts.gcode && cache.has(key)) stats = cache.get(key); // G-code is not cached, so a gcode request always slices
       else {
         const raw = rawEstimate(m, { ...opts, material: 'PLA' });
         stats = await enqueue(() => sliceStl(file, {
           template: PLA_TEMPLATE, scale: opts.scale, infill: opts.infill, rot: opts.rot,
-          layerHeight: opts.layerHeight, walls: opts.walls, supports: opts.supports,
+          layerHeight: opts.layerHeight, walls: opts.walls, supports: opts.supports, returnGcode: opts.gcode,
         }));
+        if (opts.gcode) { gcode = stats.gcode; delete stats.gcode; }
         cache.set(key, stats);
         if (cache.size > 200) cache.delete(cache.keys().next().value);
         recordSample(raw, stats, { ...opts, material: 'PLA' }, key); // teaches the instant estimate from real slices
@@ -110,7 +113,9 @@ app.post('/api/quote', upload.single('model'), async (req, res) => {
     if (String(req.query.download) === '1') {
       res.setHeader('Content-Disposition', `attachment; filename="${req.file.originalname.replace(/\.stl$/i, '').replace(/[^\w.-]/g, '_')}-result.json"`);
     }
-    res.json({ stats: { weightG, seconds, sizeMm, volumeCm3, watertight } });
+    const out = { stats: { weightG, seconds, sizeMm, volumeCm3, watertight } };
+    if (opts.gcode) out.gcode = gcode; // the full G-code as one text string
+    res.json(out);
   } catch (e) {
     res.status(500).json({ error: e.message });
   } finally {

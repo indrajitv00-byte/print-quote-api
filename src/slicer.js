@@ -41,7 +41,7 @@ function parseDuration(text) {
 }
 
 async function sliceStl(stlPath, opts = {}) {
-  const { template, scale = 1, infill, rot = [0, 0, 0], layerHeight, supports, walls } = opts;
+  const { template, scale = 1, infill, rot = [0, 0, 0], layerHeight, supports, walls, returnGcode = false } = opts;
   if (!template) throw new Error('template is required');
   const m = prepare(readStl(stlPath), scale, rot);
   const halfZ = (m.size[2] / 2).toFixed(5);
@@ -78,6 +78,7 @@ async function sliceStl(stlPath, opts = {}) {
     const t = g.match(/estimated printing time \(normal mode\)\s*=\s*(.+)/i);
     if (!w || !t) throw new Error('Could not find weight/time in G-code');
     return {
+      ...(returnGcode ? { gcode: g } : {}),
       weightG: parseFloat(w[1]),
       seconds: parseDuration(t[1]),
       sizeMm: m.size.map(x => Number(x.toFixed(2))),
