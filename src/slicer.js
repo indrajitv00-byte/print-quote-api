@@ -111,12 +111,12 @@ async function sliceStl(stlPath, opts = {}) {
     const job = path.join(work, 'job.3mf');
     const args = ['--slice', '1', '--outputdir', work, '--export-3mf', 'out.gcode.3mf'];
     // Template mode: overrides only when they differ from the template (0.2 mm, 3 walls, no supports).
-    // Printer-profile mode: always pass them, because every profile has its own defaults.
+    // Printer-profile mode: only the values that were sent are passed; everything else comes from the printer profile.
     const always = !!settings;
     if (infill) args.push(`--sparse-infill-density=${infill}%`);
     if (layerHeight && (always || layerHeight !== 0.2)) args.push(`--layer-height=${layerHeight}`);
     if (walls && (always || walls !== 3)) args.push(`--wall-loops=${walls}`);
-    if (supports || always) args.push(`--enable-support=${supports ? 1 : 0}`);
+    if (supports === true || (always && supports !== undefined)) args.push(`--enable-support=${supports ? 1 : 0}`);
     args.push(job);
     const gfile = path.join(work, 'plate_1.gcode');
     let code, log;

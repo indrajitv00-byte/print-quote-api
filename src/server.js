@@ -29,6 +29,8 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'upload-'));
 const upload = multer({ dest: tmpDir, limits: { fileSize: 50 * 1024 * 1024 } });
 const app = express();
 
+const given = v => v !== undefined && v !== '';
+
 function parseOptions(body) {
   const num = (v, d) => (v === undefined || v === '' ? d : Number(v));
   const scale = num(body.scale, 1);
@@ -49,7 +51,8 @@ function parseOptions(body) {
   const mode = String(body.mode || 'auto');
   if (!['auto', 'exact', 'estimate'].includes(mode)) return { error: 'mode must be auto, exact or estimate' };
   const bool = v => v === true || v === 'true' || v === '1' || v === 1;
-  return { scale, infill, material, printer, process: String(body.process || '').trim(), filament: String(body.filament || '').trim(), quality, layerHeight, strength, walls: STRENGTH[strength], rot, mode, supports: bool(body.supports), gcode: bool(body.gcode), qualityGiven: body.quality !== undefined && body.quality !== '' };
+  return { scale, infill, material, printer, process: String(body.process || '').trim(), filament: String(body.filament || '').trim(), quality, layerHeight, strength, walls: STRENGTH[strength], rot, mode, supports: bool(body.supports), gcode: bool(body.gcode), qualityGiven: given(body.quality),
+    infillGiven: given(body.infill), strengthGiven: given(body.strength), supportsGiven: given(body.supports) };
 }
 
 // one slice at a time: OrcaSlicer is heavy, extra requests simply wait their turn
@@ -123,17 +126,22 @@ app.post('/api/quote', upload.single('model'), async (req, res) => {
     if (profile && !wantExact) return res.status(400).json({ error: 'Choosing a printer needs the real slicer (mode exact, or auto with OrcaSlicer installed)' });
     if (opts.gcode && !wantExact) return res.status(400).json({ error: 'gcode=true needs the real slicer (mode exact or auto with OrcaSlicer installed)' });
 
-    // an explicitly chosen process keeps its own layer height unless quality was also sent
-    const layerHeight = profile && opts.process && !opts.qualityGiven ? undefined : opts.layerHeight;
+    // With a printer chosen, the printer's own process settings apply unless a value was sent;
+    // without one (your own templates), the defaults below are used
+    const eff = profile
+      ? { infill: opts.infillGiven ? opts.infill : undefined, walls: opts.strengthGiven ? opts.walls : undefined,
+          layerHeight: opts.qualityGiven ? opts.layerHeight : undefined, supports: opts.supportsGiven ? opts.supports : undefined }
+      : { infill: opts.infill, walls: opts.walls, layerHeight: opts.layerHeight, supports: opts.supports };
     let stats, gcode;
     if (wantExact) {
-      const key = crypto.createHash('sha256').update(hash + JSON.stringify([used || opts.material, opts.scale, opts.infill, layerHeight, opts.walls, opts.supports, opts.rot])).digest('hex');
+      const key = crypto.createHash('sha256').update(hash + JSON.stringify([used || opts.material, opts.scale, eff, opts.rot])).digest('hex');
       if (!opts.gcode && cache.has(key)) stats = cache.get(key); // G-code is not cached, so a gcode request always slices
       else {
         const raw = rawEstimate(m, { ...opts, material: MATERIALS[opts.material] ? opts.material : 'PLA' });
         stats = await enqueue(() => sliceStl(file, {
-          template: profile ? MATERIALS.PLA.tpl : MATERIALS[opts.material].tpl, settings: profile && profile.settings, bed: profile && profile.bed, scale: opts.scale, infill: opts.infill, rot: opts.rot,
-          layerHeight, walls: opts.walls, supports: opts.supports, returnGcode: opts.gcode,
+          template: profile ? MATERIALS.PLA.tpl : MATERIALS[opts.material].tpl, settings: profile && profile.settings, bed: profile && profile.bed,
+          scale: opts.scale, rot: opts.rot, infill: eff.infill, layerHeight: eff.layerHeight, walls: eff.walls, supports: eff.supports,
+          returnGcode: opts.gcode,
         }));
         if (opts.gcode) { gcode = stats.gcode; delete stats.gcode; }
         cache.set(key, stats);
