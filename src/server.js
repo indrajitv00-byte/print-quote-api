@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { readStl, prepare } = require('./stl');
 const { sliceStl, slicerAvailable } = require('./slicer');
 const { estimate, rawEstimate, recordSample } = require('./estimator');
+const profiles = require('./profiles');
 
 const PORT = Number(process.env.PORT) || 3000;
 const API_KEY = process.env.API_KEY || '';           // optional: if set, clients must send header x-api-key
@@ -35,7 +36,8 @@ function parseOptions(body) {
   const infill = num(body.infill, 15);
   if (!INFILLS.includes(infill)) return { error: 'infill must be one of ' + INFILLS.join(', ') };
   const material = String(body.material || 'PLA').toUpperCase();
-  if (!MATERIALS[material]) return { error: 'material must be one of ' + Object.keys(MATERIALS).join(', ') };
+  const printer = String(body.printer || '').trim();
+  if (!printer && !MATERIALS[material]) return { error: 'material must be one of ' + Object.keys(MATERIALS).join(', ') + ' (or choose a printer to use other materials)' };
   const q = String(body.quality || 'standard').toLowerCase();
   const quality = QUALITY[q] ? q : Object.keys(QUALITY).find(k => QUALITY[k] === Number(q));
   if (!quality) return { error: 'quality must be standard (0.2 mm), medium (0.15 mm) or high (0.1 mm)' };
@@ -47,7 +49,7 @@ function parseOptions(body) {
   const mode = String(body.mode || 'auto');
   if (!['auto', 'exact', 'estimate'].includes(mode)) return { error: 'mode must be auto, exact or estimate' };
   const bool = v => v === true || v === 'true' || v === '1' || v === 1;
-  return { scale, infill, material, quality, layerHeight, strength, walls: STRENGTH[strength], rot, mode, supports: bool(body.supports), gcode: bool(body.gcode) };
+  return { scale, infill, material, printer, process: String(body.process || '').trim(), filament: String(body.filament || '').trim(), quality, layerHeight, strength, walls: STRENGTH[strength], rot, mode, supports: bool(body.supports), gcode: bool(body.gcode), qualityGiven: body.quality !== undefined && body.quality !== '' };
 }
 
 // one slice at a time: OrcaSlicer is heavy, extra requests simply wait their turn
@@ -61,6 +63,26 @@ app.use((req, res, next) => {
 });
 
 app.get('/health', (req, res) => res.json({ ok: true, slicer: slicerAvailable() }));
+
+// Orca's own printers, and what each one supports
+app.get('/api/printers', (req, res) => {
+  if (!profiles.available()) return res.status(503).json({ error: 'OrcaSlicer profiles are not installed in this environment' });
+  const list = profiles.listPrinters({ vendor: req.query.vendor, q: req.query.q });
+  res.json({ count: list.length, printers: list });
+});
+app.get('/api/options', (req, res) => {
+  if (!profiles.available()) return res.status(503).json({ error: 'OrcaSlicer profiles are not installed in this environment' });
+  const m = profiles.getMachine(req.query.printer);
+  if (!m) return res.status(404).json({ error: 'Unknown printer. List them with GET /api/printers?q=...' });
+  const mat = req.query.material;
+  res.json({
+    printer: m.name,
+    defaultProcess: (profiles.pickProcess(m) || {}).name || null,
+    materials: profiles.materials(m),
+    processes: profiles.listProcesses(m).map(e => e.name).sort(),
+    filaments: profiles.listFilaments(m, mat).map(e => ({ name: e.name, material: String(profiles.resolved(e).filament_type || '') })).sort((a, b) => a.name.localeCompare(b.name)),
+  });
+});
 
 // POST /api/quote   multipart/form-data: model=<file.stl> + optional slicing settings (see README)
 app.post('/api/quote', upload.single('model'), async (req, res) => {
@@ -80,25 +102,43 @@ app.post('/api/quote', upload.single('model'), async (req, res) => {
       m = prepare(tris, opts.scale, opts.rot);
     } catch (e) { return res.status(400).json({ error: 'Could not read STL: ' + e.message }); }
 
+    // optional: slice with any printer / process / filament from OrcaSlicer's own profile library
+    let profile = null, used;
+    if (opts.printer) {
+      if (!profiles.available()) return res.status(503).json({ error: 'OrcaSlicer profiles are not installed in this environment' });
+      const machine = profiles.getMachine(opts.printer);
+      if (!machine) return res.status(400).json({ error: `Unknown printer "${opts.printer}". List them with GET /api/printers?q=...` });
+      const proc = profiles.pickProcess(machine, opts.process);
+      if (!proc) return res.status(400).json({ error: `Process "${opts.process}" is not available for this printer. See GET /api/options?printer=...` });
+      const fil = profiles.pickFilament(machine, opts.material, opts.filament);
+      if (!fil) return res.status(400).json({ error: `No ${opts.filament ? 'filament "' + opts.filament + '"' : opts.material + ' filament'} for this printer. See GET /api/options?printer=...` });
+      const settings = profiles.buildSettings(machine, proc, fil);
+      profile = { settings, bed: profiles.bedInfo(settings) };
+      used = { printer: machine.name, process: proc.name, filament: fil.name };
+    }
+
     const wantExact = opts.mode === 'exact' || (opts.mode === 'auto' && slicerAvailable());
     if (opts.mode === 'exact' && !slicerAvailable()) return res.status(503).json({ error: 'OrcaSlicer is not installed in this environment; use mode=estimate' });
 
+    if (profile && !wantExact) return res.status(400).json({ error: 'Choosing a printer needs the real slicer (mode exact, or auto with OrcaSlicer installed)' });
     if (opts.gcode && !wantExact) return res.status(400).json({ error: 'gcode=true needs the real slicer (mode exact or auto with OrcaSlicer installed)' });
 
+    // an explicitly chosen process keeps its own layer height unless quality was also sent
+    const layerHeight = profile && opts.process && !opts.qualityGiven ? undefined : opts.layerHeight;
     let stats, gcode;
     if (wantExact) {
-      const key = crypto.createHash('sha256').update(hash + JSON.stringify([opts.material, opts.scale, opts.infill, opts.layerHeight, opts.walls, opts.supports, opts.rot])).digest('hex');
+      const key = crypto.createHash('sha256').update(hash + JSON.stringify([used || opts.material, opts.scale, opts.infill, layerHeight, opts.walls, opts.supports, opts.rot])).digest('hex');
       if (!opts.gcode && cache.has(key)) stats = cache.get(key); // G-code is not cached, so a gcode request always slices
       else {
-        const raw = rawEstimate(m, opts);
+        const raw = rawEstimate(m, { ...opts, material: MATERIALS[opts.material] ? opts.material : 'PLA' });
         stats = await enqueue(() => sliceStl(file, {
-          template: MATERIALS[opts.material].tpl, scale: opts.scale, infill: opts.infill, rot: opts.rot,
-          layerHeight: opts.layerHeight, walls: opts.walls, supports: opts.supports, returnGcode: opts.gcode,
+          template: profile ? MATERIALS.PLA.tpl : MATERIALS[opts.material].tpl, settings: profile && profile.settings, bed: profile && profile.bed, scale: opts.scale, infill: opts.infill, rot: opts.rot,
+          layerHeight, walls: opts.walls, supports: opts.supports, returnGcode: opts.gcode,
         }));
         if (opts.gcode) { gcode = stats.gcode; delete stats.gcode; }
         cache.set(key, stats);
         if (cache.size > 200) cache.delete(cache.keys().next().value);
-        recordSample(raw, stats, opts, key); // teaches the instant estimate from real slices
+        if (!profile) recordSample(raw, stats, opts, key); // teaches the instant estimate from real slices
       }
     } else {
       stats = estimate(m, opts).stats;
@@ -109,10 +149,11 @@ app.post('/api/quote', upload.single('model'), async (req, res) => {
       res.setHeader('Content-Disposition', `attachment; filename="${req.file.originalname.replace(/\.stl$/i, '').replace(/[^\w.-]/g, '_')}-result.json"`);
     }
     const out = { stats: { weightG, seconds, sizeMm, volumeCm3, watertight } };
+    if (used) out.used = used;
     if (opts.gcode) out.gcode = gcode; // the full G-code as one text string
     res.json(out);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   } finally {
     cleanup();
   }
@@ -125,4 +166,5 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err && err.message ? err.message : 'Server error' });
 });
 
+if (profiles.available()) console.log('OrcaSlicer profiles loaded:', profiles.listPrinters().length, 'printers');
 app.listen(PORT, () => console.log(`print-quote-api on :${PORT} (slicer ${slicerAvailable() ? 'available' : 'NOT found - estimate mode only'})`));
